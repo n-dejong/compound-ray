@@ -113,7 +113,7 @@ void initLaunchParams( const MulticamScene& scene ) {
     lights[2].position  = scene.aabb().center() + make_float3( 0.0f, 4.0f, -5.0f);
     lights[2].falloff   = Light::Falloff::QUADRATIC;
     lights[3].color     = { 1.0f, 1.0f, 0.8f };
-    lights[3].intensity = 0.5f;
+    lights[3].intensity = 0.0f;
     lights[3].position  = scene.aabb().center() + make_float3( 1.0f, -6.0f, 0.0f);
     lights[3].falloff   = Light::Falloff::QUADRATIC;
 
