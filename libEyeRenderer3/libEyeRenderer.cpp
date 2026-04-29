@@ -95,7 +95,7 @@ void initLaunchParams( const MulticamScene& scene ) {
 
     params.frame_buffer = nullptr; // Will be set when output buffer is mapped
     params.frame = 0;
-    params.lighting = false;
+    params.lighting = true;
 
     const float loffset = scene.aabb().maxExtent();
 
