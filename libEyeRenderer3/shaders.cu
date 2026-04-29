@@ -841,6 +841,20 @@ extern "C" __global__ void __closesthit__radiance()
 
     float3 result = make_float3( 0.0f );
 
+    // DEBUG: Print light count and position
+    if(optixGetLaunchIndex().x == 0 && optixGetLaunchIndex().y == 0) {
+        printf("DEBUG: Light count = %u\n", params.lights.count);
+        for(int d = 0; d < params.lights.count; d++) {
+            Light::Point light = params.lights[d];
+            printf("Light %d: pos=(%.2f,%.2f,%.2f) intensity=%.2f\n", 
+                   d, light.position.x, light.position.y, light.position.z, light.intensity);
+        }
+        printf("Hit point: (%.2f,%.2f,%.2f), Normal: (%.2f,%.2f,%.2f)\n",
+               geom.P.x, geom.P.y, geom.P.z, geom.N.x, geom.N.y, geom.N.z);
+    }
+
+    for( int i = 0; i < params.lights.count; ++i )
+
     for( int i = 0; i < params.lights.count; ++i )
     {
         Light::Point light = params.lights[i];
