@@ -853,7 +853,6 @@ extern "C" __global__ void __closesthit__radiance()
                geom.P.x, geom.P.y, geom.P.z, geom.N.x, geom.N.y, geom.N.z);
     }
 
-    for( int i = 0; i < params.lights.count; ++i )
 
     for( int i = 0; i < params.lights.count; ++i )
     {
