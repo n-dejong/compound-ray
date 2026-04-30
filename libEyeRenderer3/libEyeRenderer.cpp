@@ -101,7 +101,7 @@ void initLaunchParams( const MulticamScene& scene ) {
 
     std::vector<Light::Point> lights(4);
     lights[0].color     = { 1.0f, 1.0f, 0.8f };
-    lights[0].intensity = 0.0f;
+    lights[0].intensity = 15.0f;
     lights[0].position  = scene.aabb().center() + make_float3( loffset );
     lights[0].falloff   = Light::Falloff::QUADRATIC;
     lights[1].color     = { 0.8f, 0.8f, 1.0f };
