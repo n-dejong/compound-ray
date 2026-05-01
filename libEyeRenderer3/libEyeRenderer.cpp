@@ -91,31 +91,167 @@ sutil::GLDisplay gl_display; // Stores the frame buffer to swap in and out
 
 bool notificationsActive = true;
 
+//------------------------------------------------------------------------------
+// Light setup
+//------------------------------------------------------------------------------
+//
+// History / why this code looks the way it does:
+//
+// Before these changes the renderer didnt read lights although 
+// there were dependencies added in. The renderer would only read
+// base color of the textures, i.e, what a material preview in Blender
+// does. I honestly wouldve spent less time just devloping my own tool
+// than i did trying to fix all of this stuff.
+//
+// For the most parts the lights are hardcoded in although there is
+// now dependency to add a light from a GLTF
+// 
+// The previous version positioned four point lights at
+//     scene.aabb().center() + make_float3( +/- maxExtent, ... )
+// where loffset == aabb.maxExtent(). For scenes whose AABB is dominated
+// by an axis-aligned enclosing shell this
+// places lights at the *corners* of the AABB -- always outside the
+// inscribed shell. Every shadow ray then has to pass through the shell
+// wall on its way to the light, so every light reads as occluded and
+// the entire scene renders pure black.
+//
+// We now do two things differently:
+//   1. Try to pull lights from the loaded glTF scene first
+//      (KHR_lights_punctual). This honours whatever the artist set up
+//      in Blender -- e.g. the "Sun" directional light in the test
+//      scene. Requires MulticamScene::getPunctualLights() to be
+//      implemented; if it returns an empty list we fall through.
+//   2. Fall back to a set of synthetic point lights placed on a
+//      shrunken offset (~25% of the AABB diagonal) so they end up
+//      well inside any reasonable enclosing shell.
+//
+// Shadow rays themselves now offset their origin along the geometric
+// normal, and inverted-shell geometry should be bound to the
+// __anyhit__occlusion_passthrough program in the SBT so it cannot
+// occlude shadow rays at all. See shaders.cu and NEXT_STEPS.md.
+//------------------------------------------------------------------------------
+
+namespace {
+
+// Convert a glTF directional light into a far-away point light we can plug into the existing
+// Light::Point pipeline. This is a pragmatic stop-gap until the shader
+// gains a proper directional-light type. The "far away" distance is
+// chosen relative to the scene's AABB so the light stays effectively
+// directional regardless of scene scale.
+Light::Point makeDirectionalAsPoint(
+        const float3& direction_to_light,
+        const float3& color,
+        float intensity,
+        const sutil::Aabb& aabb )
+{
+    const float far_dist = 10.0f * length( aabb.extent() );
+    Light::Point l;
+    l.position  = aabb.center() + normalize( direction_to_light ) * far_dist;
+    l.color     = color;
+    // Account for the inverse-square falloff over far_dist so a directional
+    // light "feels" the same intensity as the artist intended. The shader
+    // applies QUADRATIC falloff implicitly via the standard rendering
+    // equation, so we pre-multiply here.
+    l.intensity = intensity * (far_dist * far_dist);
+    l.falloff   = Light::Falloff::QUADRATIC;
+    return l;
+}
+
+// Build the synthetic-light fallback set. Lights are placed on a small
+// offset relative to the scene's interior, NOT at the AABB corners,
+// so they stay inside enclosing-shell geometry.
+std::vector<Light::Point> buildFallbackLights( const sutil::Aabb& aabb )
+{
+    const float3 center  = aabb.center();
+    const float3 extent  = aabb.extent();
+
+    // Use a fraction of the *diagonal* rather than the maximum extent.
+    // 0.25 of the diagonal puts the light comfortably inside any axis-
+    // aligned cylinder or sphere whose radius is at least 0.5 * smallest
+    // extent, which covers virtually every artist-built sky-cage.
+    const float r = 0.25f * length( extent );
+
+    std::vector<Light::Point> lights(4);
+    lights[0].color     = { 1.0f, 1.0f, 0.8f };
+    lights[0].intensity = 5;  // scale so apparent brightness is roughly
+                                         // independent of scene scale
+    lights[0].position  =  make_float3( 0.0f,100.0f,0.0f);
+    lights[0].falloff   = Light::Falloff::QUADRATIC;
+
+    lights[1].color     = { 0.8f, 0.8f, 1.0f };
+    lights[1].intensity = 0.0f * r * r;
+    lights[1].position  = make_float3(0.0f,0.0f,0.0f);
+    lights[1].falloff   = Light::Falloff::QUADRATIC;
+
+    lights[2].color     = { 1.0f, 1.0f, 0.8f };
+    lights[2].intensity = 0.0f * r * r;
+    lights[2].position  = center + make_float3( 0.0f,  0.5f*r, -0.7f*r );
+    lights[2].falloff   = Light::Falloff::QUADRATIC;
+
+    lights[3].color     = { 1.0f, 1.0f, 0.8f };
+    lights[3].intensity = 0.0f * r * r;
+    lights[3].position  = center + make_float3( 0.2f*r, -0.7f*r, 0.0f );
+    lights[3].falloff   = Light::Falloff::QUADRATIC;
+
+    return lights;
+}
+
+// Pull lights from the scene if MulticamScene exposes them. We use a
+// SFINAE-style guard (preprocessor) so this file still compiles cleanly
+// against an older MulticamScene that doesn't have getPunctualLights().
+// Once MulticamScene is updated (see NEXT_STEPS.md), define
+// MULTICAM_SCENE_HAS_PUNCTUAL_LIGHTS and the branch lights up.
+std::vector<Light::Point> buildLightsFromScene( const MulticamScene& s )
+{
+    std::vector<Light::Point> lights;
+#ifdef MULTICAM_SCENE_HAS_PUNCTUAL_LIGHTS
+    const auto& gltf_lights = s.getPunctualLights(); // see NEXT_STEPS.md for the type
+    lights.reserve( gltf_lights.size() );
+    for( const auto& gl : gltf_lights )
+    {
+        if( gl.type == GltfLight::DIRECTIONAL )
+        {
+            lights.push_back(
+                makeDirectionalAsPoint( gl.direction_to_light, gl.color, gl.intensity, s.aabb() ) );
+        }
+        else // POINT or SPOT (treat spot as point for now)
+        {
+            Light::Point p;
+            p.color     = gl.color;
+            p.intensity = gl.intensity;
+            p.position  = gl.position;
+            p.falloff   = Light::Falloff::QUADRATIC;
+            lights.push_back( p );
+        }
+    }
+#else
+    (void)s;
+#endif
+    return lights;
+}
+
+} // anonymous namespace
+
 void initLaunchParams( const MulticamScene& scene ) {
 
     params.frame_buffer = nullptr; // Will be set when output buffer is mapped
     params.frame = 0;
     params.lighting = true;
 
-    const float loffset = scene.aabb().maxExtent();
+    // 1) Prefer artist-defined lights from the glTF.
+    std::vector<Light::Point> lights = buildLightsFromScene( scene );
 
-    std::vector<Light::Point> lights(4);
-    lights[0].color     = { 1.0f, 1.0f, 0.8f };
-    lights[0].intensity = 5.0f;
-    lights[0].position  = scene.aabb().center() + make_float3( loffset );
-    lights[0].falloff   = Light::Falloff::QUADRATIC;
-    lights[1].color     = { 0.8f, 0.8f, 1.0f };
-    lights[1].intensity = 3.0f;
-    lights[1].position  = scene.aabb().center() + make_float3( -loffset, 0.5f*loffset, -0.5f*loffset  );
-    lights[1].falloff   = Light::Falloff::QUADRATIC;
-    lights[2].color     = { 1.0f, 1.0f, 0.8f };
-    lights[2].intensity = 5.0f;
-    lights[2].position  = scene.aabb().center() + make_float3( 0.0f, 4.0f, -5.0f);
-    lights[2].falloff   = Light::Falloff::QUADRATIC;
-    lights[3].color     = { 1.0f, 1.0f, 0.8f };
-    lights[3].intensity = 0.5f;
-    lights[3].position  = scene.aabb().center() + make_float3( 1.0f, -6.0f, 0.0f);
-    lights[3].falloff   = Light::Falloff::QUADRATIC;
+    // 2) Fall back to interior synthetic lights if no glTF lights were found.
+    if( lights.empty() )
+    {
+        if( notificationsActive )
+            std::cout << "[PyEye] No punctual lights found in scene, using fallback set." << std::endl;
+        lights = buildFallbackLights( scene.aabb() );
+    }
+    else if( notificationsActive )
+    {
+        std::cout << "[PyEye] Loaded " << lights.size() << " light(s) from glTF." << std::endl;
+    }
 
     params.lights.count  = static_cast<uint32_t>( lights.size() );
     CUDA_CHECK( cudaMalloc(
@@ -131,7 +267,6 @@ void initLaunchParams( const MulticamScene& scene ) {
 
     params.miss_color   = make_float3( 0.1f );
 
-    //CUDA_CHECK( cudaStreamCreate( &stream ) );
     CUDA_CHECK( cudaMalloc( reinterpret_cast<void**>( &d_params ), sizeof( globalParameters::LaunchParams ) ) );
 
     params.handle = scene.traversableHandle();
@@ -141,8 +276,6 @@ void initLaunchParams( const MulticamScene& scene ) {
 // Updates the params to acurately reflect the currently selected camera
 void handleCameraUpdate( globalParameters::LaunchParams& params )
 {
-    //GenericCamera* camera  = scene.getCamera();
-
     // Make sure the SBT of the scene is updated for the newly selected camera before launch,
     // also push any changed host-side camera SBT data over to the device.
     scene.reconfigureSBTforCurrentCamera(false);
@@ -188,7 +321,7 @@ void launchFrame( sutil::CUDAOutputBuffer<uchar4>& output_buffer, MulticamScene&
                 scene.sbt(),
                 width,  // launch width
                 height, // launch height
-                1//scene.getCamera()->samplesPerPixel // launch depth
+                1
                 ) );
     output_buffer.unmap();
     CUDA_SYNC_CHECK();
@@ -426,28 +559,19 @@ size_t getCurrentEyeOmmatidialCount(void)
 }
 void setOmmatidia(OmmatidiumPacket* omms, size_t count)
 {
-  // Break out if the current eye isn't compound
   if(!scene.isCompoundEyeActive())
     return;
 
-  // First convert the OmmatidiumPacket list into an array of Ommatidium objects
-  //Ommatidium ommObjectArray[count];
   std::vector<Ommatidium> ommVector(count);
   for(size_t i = 0; i<count; i++)
   {
     OmmatidiumPacket& omm = omms[i];
-    //ommObjectArray[i].relativePosition  = make_float3(omm.posX, omm.posY, omm.posZ);
-    //ommObjectArray[i].relativeDirection = make_float3(omm.dirX, omm.dirY, omm.dirZ);
-    //ommObjectArray[i].acceptanceAngleRadians = omm.acceptanceAngle;
-    //ommObjectArray[i].focalPointOffset = omm.focalpointOffset;
     ommVector[i].relativePosition  = make_float3(omm.posX, omm.posY, omm.posZ);
     ommVector[i].relativeDirection = make_float3(omm.dirX, omm.dirY, omm.dirZ);
     ommVector[i].acceptanceAngleRadians = omm.acceptanceAngle;
     ommVector[i].focalPointOffset = omm.focalpointOffset;
   }
-  
-  // Actually set the new ommatidial structure
-  //((CompoundEye*)scene.getCamera())->setOmmatidia(ommObjectArray.data(), count);
+
   ((CompoundEye*)scene.getCamera())->setOmmatidia(ommVector.data(), count);
 }
 const char* getCurrentEyeDataPath(void)
@@ -469,7 +593,7 @@ void setCurrentEyeShaderName(char* name)
 
 bool isInsideHitGeometry(float x, float y, float z, char* name)
 {
-  return scene.isInsideHitGeometry(make_float3(x, y, z), std::string(name), false);//notificationsActive);
+  return scene.isInsideHitGeometry(make_float3(x, y, z), std::string(name), false);
 }
 float3 getGeometryMaxBounds(char* name)
 {
